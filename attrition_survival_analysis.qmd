@@ -10,6 +10,7 @@ jupyter:
 format:
   html:
     code-fold: true
+    embed-resources: true
 ---
 
 
