@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "attrition"
+version = "0.1.0"
+description = "A notebook analysis on attrition in an HR dataset"
+authors = ["Andreas Domberg <andom@posteo.de>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+lifelines = "^0.30.3"
+numpy = "^2.5.1"
+plotly = "^6.9.0"
+pandas = "<3.0"
+jinja2 = "^3.1.6"
+nbformat = "^5.10.4"
+quarto = "^0.1.0"
+ipykernel = "^7.3.0"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^7.3.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
