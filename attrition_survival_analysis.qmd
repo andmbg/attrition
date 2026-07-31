@@ -11,6 +11,9 @@ format:
   html:
     code-fold: true
     embed-resources: true
+    theme: [default, custom.scss]
+    document-css: true
+    page-layout: full
 ---
 
 
@@ -39,6 +42,18 @@ from lifelines.statistics import logrank_test
 
 pd.set_option("display.max_columns", 50)
 
+# Plot-Stil anpassen:
+custom_template = go.layout.Template(
+    layout=go.Layout(
+        paper_bgcolor="rgba(255, 255, 255, 0)",
+        plot_bgcolor="#dddddd",
+        title=dict(x=0.05, xanchor="auto")
+    )
+)
+
+pio.templates["custom"] = custom_template
+pio.templates.default = "custom"
+
 DATA_PATH = "data/WA_Fn-UseC_-HR-Employee-Attrition.csv"
 ```
 
@@ -51,6 +66,8 @@ DATA_PATH = "data/WA_Fn-UseC_-HR-Employee-Attrition.csv"
 - `event_observed` = `Attrition` (1 = Kündigung beobachtet, 0 = zensiert / noch im Unternehmen)
 
 ```{python}
+#| column: screen-inset
+
 df = pd.read_csv(DATA_PATH)
 df.head()
 ```
@@ -93,7 +110,7 @@ fig = (
         xaxis_title="Years",
         yaxis_title="Number of employees",
         title="<b>Employee tenure</b><br>How many employees have been with us or left after this many years",
-        margin=dict(t=80)
+        margin=dict(t=80),
     )
     .update_traces(
         showlegend=False,
@@ -154,7 +171,7 @@ fig.update_layout(
     barmode="stack",
     title="<b>Distribution of ongoing vs. terminated employments</b><br>across employment durations. Vertical lines are expected values.",
     yaxis_range=[0, 180],
-    margin_t=80
+    margin_t=80,
 )
 
 fig.show()
