@@ -13,20 +13,12 @@ format:
     embed-resources: true
     theme: [default, custom.scss]
     document-css: true
-    page-layout: full
+    grid:
+      margin-width: 350px
+reference-location: margin
+citation-location: margin
+fig-cap-location: margin
 ---
-
-
-Dieses Notebook demonstriert Survival-Analyse-Methoden (Kaplan-Meier, Log-Rank-Test, Cox Proportional-Hazards) angewendet auf **Mitarbeiterfluktuation (Attrition)**.
-
-Wir verwenden dazu einen öffentlichen Beispieldatensatz von Kaggle:
-
-`IBM HR Analytics Employee Attrition & Performance`  
-https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-dataset
-
-Die Kernidee dieser Analyse ist, dass wir eine Schätzung dazu haben wollen, wie lange Mitarbeitende im Unternehmen bleiben, abhängig von bestimmten Faktoren.
-Hauptproblem dabei sind *rechtszensierte Daten*: Für viele Individuen wissen wir garnicht, nach wie vielen Jahren sie kündigen werden, nur, dass sie mindestens von ihrer Einstellung bis heute dabei sind.
-
 
 ```{python}
 import numpy as np
@@ -37,7 +29,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 pio.renderers.default = "notebook"
 
-from lifelines import KaplanMeierFitter
+from lifelines import KaplanMeierFitter, CoxPHFitter
 from lifelines.statistics import logrank_test
 
 pd.set_option("display.max_columns", 50)
@@ -47,7 +39,8 @@ custom_template = go.layout.Template(
     layout=go.Layout(
         paper_bgcolor="rgba(255, 255, 255, 0)",
         plot_bgcolor="#dddddd",
-        title=dict(x=0.05, xanchor="auto")
+        title=dict(x=0.05, xanchor="auto"),
+        yaxis_showline=False,
     )
 )
 
@@ -57,26 +50,27 @@ pio.templates.default = "custom"
 DATA_PATH = "data/WA_Fn-UseC_-HR-Employee-Attrition.csv"
 ```
 
+*Dieses Notebook demonstriert Survival-Analyse-Methoden (Kaplan-Meier, Log-Rank-Test, Cox Proportional-Hazards) angewendet auf Mitarbeiterfluktuation (Attrition).*
+*Wir verwenden dazu einen öffentlichen Beispieldatensatz von Kaggle:*
+[`IBM HR Analytics Employee Attrition & Performance`](https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-dataset)
+
 ## Der Datensatz
 
-
-
-**Zielvariablen für die Survival-Analyse:**
-- `duration` = `YearsAtCompany` (Zeit bis Event oder Zensierung, in Jahren)
-- `event_observed` = `Attrition` (1 = Kündigung beobachtet, 0 = zensiert / noch im Unternehmen)
+Die Kernidee dieser Analyse ist, dass wir eine Schätzung dazu haben wollen, wie lange Mitarbeitende im Unternehmen bleiben, abhängig von bestimmten Faktoren.
+Hauptproblem dabei sind **rechtszensierte Daten**: Für viele Individuen wissen wir garnicht, nach wie vielen Jahren sie kündigen werden, nur, dass sie mindestens von ihrer Einstellung bis heute dabei sind.
+Ein kleiner Auszug aus den Daten:
 
 ```{python}
 #| column: screen-inset
 
+# Zielvariablen für Survival-Analyse ableiten
 df = pd.read_csv(DATA_PATH)
+df["duration"] = df["YearsAtCompany"].clip(lower=0.01)  # duration > 0 erforderlich
+df["event_observed"] = (df["Attrition"] == "Yes").astype(int)
 df.head()
 ```
 
 ```{python}
-# Zielvariablen für Survival-Analyse ableiten
-df["duration"] = df["YearsAtCompany"].clip(lower=0.01)  # Duration > 0 erforderlich
-df["event_observed"] = (df["Attrition"] == "Yes").astype(int)
-
 print(f"Anzahl Beobachtungen: {len(df)}")
 print(f"Beobachtete Events (Kündigungen): {df['event_observed'].sum()} "
       f"({df['event_observed'].mean():.1%})")
@@ -86,35 +80,30 @@ print(f"Zensierte Fälle (noch im Unternehmen): {(1 - df['event_observed']).sum(
 
 ## Explorative Analyse
 
-Es lohnt sich immer, in einen Datensatz hineinzuschauen.
-Der hier ist ein gut vorbereiteter, sauberer Beispieldatensatz, bei dem wir uns schon mal einiges an Cleaning sparen, denn darum soll es nicht gehen.
-
-Hier wichtig: 
-
-Bevor wir modellieren, schauen wir uns die Verteilung der Tenure (Betriebszugehörigkeit) und
-die Gesamt-Attritionsrate an. Wichtig: Personen mit `event_observed = 0` sind **rechtszensiert** —
-sie haben nicht gekündigt, sondern die Beobachtung endete, während sie noch angestellt waren.
-Ihre tatsächliche Gesamt-Tenure ist unbekannt und mindestens so lang wie die beobachtete Dauer.
-Sie einfach aus der Analyse auszuschließen oder als „werden nie kündigen“ zu behandeln,
-würde die Ergebnisse systematisch verzerren — genau das vermeidet die Survival-Analyse.
+Bevor wir anfangen zu modellieren, schauen wir uns die Verteilung der `duration` (Betriebszugehörigkeit) und
+die Gesamt-Attritionsrate an. Wichtig: Personen mit `event_observed = 0` sind *rechtszensiert*.
+Sie haben nicht gekündigt, sondern die Beobachtung endete, während sie noch angestellt waren.
+Sie sind mindestens bis zu dem Zeitpunkt geblieben, als wir gezählt haben, mehr können wir aber nicht über sie sagen.
+Sie einfach aus der Analyse auszuschließen oder als „werden nie kündigen“ zu behandeln, würde aber die Ergebnisse systematisch verzerren.
+Genau das vermeidet die Survival-Analyse.
 
 ```{python}
-#| column: page
-
-df_distro = df.duration.value_counts().sort_index()
+#| label: fig-density-all
+#| fig-cap: "Die Verteilung der Jahre-im-Betrieb aller Mitarbeitenden, ob ehemalige oder gegenwärtige."
 
 fig = (
     px.histogram(df.duration)
     .update_layout(
         bargap=.1,
-        xaxis_title="Years",
-        yaxis_title="Number of employees",
-        title="<b>Employee tenure</b><br>How many employees have been with us or left after this many years",
-        margin=dict(t=80),
+        xaxis_title="Jahre",
+        yaxis_title="Anzahl Angestellte",
+        title="<b>Verteilung der Verweildauer insgesamt</b><br>Wie viele Mitarbeitende sind oder waren X Jahre im Betrieb?",
+        margin=dict(t=80, r=0, l=40),
     )
     .update_traces(
         showlegend=False,
-        hovertemplate="<b>Tenure duration</b><br><br>%{x} years: %{y} employees<extra></extra>"
+        hovertemplate="<b>Verweildauer</b><br>%{y} Mitarbeitende sind oder waren<br>%{x} Jahre bei uns.<extra></extra>",
+        marker_color="#708ebb"
     )
 )
 
@@ -123,7 +112,8 @@ fig.show()
 
 
 ```{python}
-#| column: page
+#| label: fig-density-twogroup
+#| fig-cap: "Die gleiche Verteilung wie oben, aber nach Gruppen aufgeschlüsselt. Die beiden senkrechten Linien markieren jeweils den Mittelwert der Verweildauer über alle Mitglieder der jeweiligen Gruppe hinweg. Hier wird deutlich: Würden wir uns nur auf diejenigen konzentrieren, die wirklich gegangen sind, würden wir die durchschnittliche Verweildauer aller Mitarbeitenden unterschätzen."
 
 df_grpdistro = df[["duration", "Attrition"]]
 
@@ -134,7 +124,7 @@ fig = make_subplots(
     rows=2,
     shared_yaxes=True,
     shared_xaxes=True,
-    vertical_spacing=.01
+    vertical_spacing=.01,
 )
 
 for atr, grp in df_grpdistro.groupby("Attrition"):
@@ -145,10 +135,10 @@ for atr, grp in df_grpdistro.groupby("Attrition"):
                 x=dgrp.duration,
                 y=[len(dgrp)],
                 name=atr,
-                marker_color={"Yes": "green", "No": "#888888"}[atr],
+                marker_color={"Yes": "#759b75", "No": "#959595"}[atr],
                 showlegend=False,
                 marker_line_width=0,
-                hovertemplate=f"%{{x}} years: %{{y}} employees<extra>Event occurred: {atr}</extra>"
+                hovertemplate=f"<b>Verweildauer</b><br>%{{y}} Mitarbeitende sind oder waren<br>%{{x}} Jahre bei uns.<extra>Event occurred: {atr}</extra>"
             ),
             col=1, row={"Yes": 1, "No": 2}[atr],
         )
@@ -158,7 +148,7 @@ for atr, grp in df_grpdistro.groupby("Attrition"):
             x=[grp.duration.mean(), grp.duration.mean()],
             y=[0, 180],
             mode="lines",
-            marker_color={"Yes": "darkgreen", "No": "#444444"}[atr],
+            marker_color={"Yes": "#5d845d", "No": "#787878"}[atr],
             marker_line_dash="dot",
             showlegend=False,
             hoverinfo="skip",
@@ -166,36 +156,57 @@ for atr, grp in df_grpdistro.groupby("Attrition"):
         col=1, row={"Yes": 1, "No": 2}[atr],
     )
 
+    fig.add_annotation(
+        text="Ehemalige Mitarbeitende",
+        x=.5, xanchor="center", xref="paper",
+        y=170, yanchor="top", yref="y",
+        showarrow=False,
+        font_size=15,
+    )
+
+    fig.add_annotation(
+        text="Aktuell Beschäftigte (Gesamtdauer unbekannt)",
+        x=.5, xanchor="center", xref="paper",
+        y=170, yanchor="top", yref="y2",
+        showarrow=False,
+        font_size=15,
+    )
+
 fig.update_layout(
     bargap=.1,
     barmode="stack",
-    title="<b>Distribution of ongoing vs. terminated employments</b><br>across employment durations. Vertical lines are expected values.",
+    title="<b>Verteilung der Verweildauer</b><br>getrennt nach Ehemaligen und aktuell Beschäftigten.",
     yaxis_range=[0, 180],
-    margin_t=80,
+    yaxis2_range=[0, 180],
+    margin=dict(t=80, r=0, l=40),
+    yaxis_title="Anzahl", yaxis2_title="Anzahl",
+    xaxis2_title="Jahre"
 )
 
 fig.show()
 ```
 
-## Schätzung der Verweildauer
+## Schätzung der mittleren Verweildauer
 
-Wir sind daran interessiert, wie lange Mitarbeitende bei uns bleiben.
-Genauer: Nach welcher Zeit man mit welcher Wahrscheinlichkeit rechnen muss, dass sie gehen.
+Wir sind zunächst daran interessiert, wie lange Mitarbeitende im Unternehmen bleiben.
+Genauer: Wie sich mit der Zeit die Wahrscheinlichkeit entwickelt, dass sie noch da sind.
 Die Zählungen oben legen eine Intuition nahe: Man könnte mit Blick auf die Verteilung der tatsächlich erfolgten Kündigungen (grün) über die Jahre versucht sein zu sagen:
 „Wenn wir wissen wollen, nach welcher Zeit eine 50%-Wahrscheinlichkeit besteht, dass jemand geht, dann suchen wir uns den Punkt auf der Zeitachse, der genau 50% der gekündigten Mitarbeitenden links und rechts von sich hat.“
 
 Der Gedanke dahinter: Ohne zusätzliche Informationen gehen wir davon aus, dass die Zukunft nicht überraschend von der Vergangenheit abweicht und somit der Mittelwert der Verweildauer eine:r Mitarbeiter:in in der Vergangenheit unser *best guess* über die zu erwartende Verweildauer von Neuzugängen ist.
 
-Diese Intuition hat ein Problem: Alljene Mitarbeitenden, die heute, zum Zeitpunkt der Zählung, aktiver Teil des Kollegiums sind. Erstens wissen wir prinzipiell nicht, wie lang ihr Verbleib sein wird. Und zweitens: Wie die beiden Linien für die Erwartunswerte der Verweildauer zeigen, würde uns eine Schätzung nur anhand der Ehemaligen in die Irre führen -- mit 5,1 Jahren ist diese Schätzung pessimistischer als der Blick auf unser aktives Kollegium nahelegt.
+Diese Intuition hat ein Problem: Alljene Mitarbeitenden, die heute, zum Zeitpunkt der Zählung, aktiver Teil der Belegschaft sind.
+Erstens wissen wir prinzipiell nicht, wie lang ihr Verbleib sein wird.
+Und zweitens: Wie die beiden Linien für die Erwartunswerte der Verweildauer zeigen, würde uns eine Schätzung nur anhand der Ehemaligen in die Irre führen.
 
-## Kaplan-Meier-Schätzung
+### Kaplan-Meier-Schätzung
 
-Der Kaplan-Meier-Schätzer ist ein statistisches Instrument, das den gesamten Datensatz -- inklusive der aktiven Mitarbeitenden -- berücksichtigt.
-In der Fachsprache sind dies die „zensierten Daten“: Klar werden unsere heutigen Kolleg:innen einmal aus dem Unternehmen austreten, diese Zeitpunkte sind eines Tages real -- aber für uns heute nicht zugänglich.
-
-Der Schätzer gibt an, mit welcher Wahrscheinlichkeit ein:e Mitarbeitende nach einer bestimmten Zeit *t* noch im Unternehmen ist, unter korrekter Berücksichtigung der Zensierung.
+Der Kaplan-Meier-Schätzer ist ein statistisches Instrument, das den gesamten Datensatz inklusive der aktiven Mitarbeitenden berücksichtigt.
+Er gibt an, mit welcher Wahrscheinlichkeit ein beliebiges Individuum nach einer bestimmten Zeit *t* noch im Unternehmen ist, unter korrekter Berücksichtigung der Zensierung.
 
 ```{python}
+# Hilfsfunktionen für wiederholte Aufgaben
+
 km = KaplanMeierFitter().fit(
     durations=df.duration,
     event_observed=df.event_observed,
@@ -220,6 +231,7 @@ def add_km_ci(fig: go.Figure, km: KaplanMeierFitter, color: str, label: str = "T
             showlegend=False,
             legendgroup=label,
             name="Lower",
+            hovertemplate="%{y:.2f}",
     ))
 
     fig.add_trace(
@@ -233,6 +245,7 @@ def add_km_ci(fig: go.Figure, km: KaplanMeierFitter, color: str, label: str = "T
             showlegend=False,
             legendgroup=label,
             name="Upper",
+            hovertemplate="%{y:.2f}",
         ),
     )
 
@@ -245,7 +258,8 @@ def add_km_ci(fig: go.Figure, km: KaplanMeierFitter, color: str, label: str = "T
             line_color=color,
             showlegend=False,
             legendgroup=label,
-            name=label
+            name=label,
+            hovertemplate="%{y:.2f}",
         )
     )
 
@@ -253,7 +267,9 @@ def add_km_ci(fig: go.Figure, km: KaplanMeierFitter, color: str, label: str = "T
 ```
 
 ```{python}
-#| column: page
+#| label: fig-km-all
+#| fig-cap: "Die Kaplan-Meier-Kurve ist im Grunde eine alternative Darstellungsweise des Datensatzes mit zusätzlicher Bezifferung der Vorhersageunsicherheit. Das blaue Band zeigt ein 95%-iges Konfidenzintervall, das wiedergibt, wie groß die Unsicherheit über das Ergebnis ist. Nach hinten wird dieses Intervall breiter, weil hier immer weniger Daten vorliegen - nur wenige Mitarbeitende sind über 30 Jahre dabei."
+
 
 fig = go.Figure()
 add_km_ci(fig, km, "blue")
@@ -262,19 +278,20 @@ fig.update_layout(
     title="<b>Kaplan-Meier-Kurve:</b><br>Wahrscheinlichkeit, im Unternehmen zu bleiben",
     yaxis_title="Verbleibenswahrscheinlichkeit",
     xaxis_title="Jahre im Unternehmen",
-    margin_t=80,
+    margin=dict(t=80, r=0, l=40),
+    yaxis_range=[0, 1],
 )
 fig.show()
 ```
 
-### Blick auf bestimmte Gruppen
+### Blick auf einzelne Gruppen
 
-Damit sehen wir den Schätzwert über die gesamte Belegschaft hinweg. Nun haben wir aber noch einige weitere Daten, die es uns erlauben, zu schauen, was herauskommt, wenn wir etwa nur auf Mitarbeitende blicken, die Überstunden auf dem Konto haben.
+Mit der Analyse wie sie bis jetzt steht sehen wir den Schätzwert über die gesamte Belegschaft hinweg. Nun haben wir aber noch einige weitere Daten, die es uns erlauben, zu fragen, wie sich diese Kurve verhält, wenn wir die Belegschaft aufteilen in jene, die Überstunden auf dem Konto haben, gegenüber den anderen.
 
 ```{python}
-#| column: page
+#| label: fig-km-overtime
+#| fig-cap: "Zwei separate Kaplan-Meier-Kurven, nachdem wir die Belegschaft in gekündigt und noch aktiv aufgeteilt haben. Die Konfidenzintervalle sind breiter, weil pro Kurve weniger Daten verwendet werden. Die Bereiche, in denen sich die beiden Bänder nicht berühren zeigen, dass sich die Gruppen durchaus voneinander unterscheiden."
 
-# Stratifiziert nach OverTime
 colors = {
     "Yes": "#228899",
     "No": "#ff8800",
@@ -295,14 +312,21 @@ fig.update_layout(
     title="<b>Kaplan-Meier-Kurve</b><br>für die Gruppen ohne (orange) und mit (blau) Überstunden",
     yaxis_title="Verbleibenswahrscheinlichkeit",
     xaxis_title="Jahre im Unternehmen",
+    yaxis_range=[0, 1],
     hovermode="x",
-    margin_t=80,
+    margin=dict(t=80, r=0, l=40),
 )
 
 # Log-Rank-Test: Unterscheiden sich die beiden Kurven statistisch signifikant?
 group_yes = df[df["OverTime"] == "Yes"]
 group_no = df[df["OverTime"] == "No"]
 
+fig.show()
+```
+
+Das Ergebnis: Mitarbeitende mit einem aktiv gefüllten Überstundenkonto neigen eher dazu, früher aus dem Unternehmen zu gehen.
+
+```{python}
 result = logrank_test(
     group_yes["duration"], group_no["duration"],
     event_observed_A=group_yes["event_observed"], event_observed_B=group_no["event_observed"],
@@ -312,67 +336,167 @@ if result.p_value < 0.05:
     print("→ Statistisch signifikanter Unterschied zwischen den Gruppen (p < 0.05).")
 else:
     print("→ Kein statistisch signifikanter Unterschied zwischen den Gruppen (p >= 0.05).")
-
-fig.show()
 ```
 
-Das Ergebnis: Mitarbeitende mit einem aktiv gefüllten Überstundenkonto neigen eher dazu, früher aus dem Unternehmen zu gehen.
+Und ein Log-Rank-Test drückt als Kennwert aus, was die Grafik bereits suggeriert.
 
-Wir zeichnen eine ähnliche gruppenweise Darstellung der Daten mit Bezug zu der Variable der Jobzufriedenheit auf einer Skala von 1 bis 4:
+
+## Das Cox Proportional-Hazards-Modell
+
+Die Kaplan-Meier-Kurven eignen sich gut, um den Effekt *einer* Variable auf einmal zu untersuchen. Wir teilen die Stichprobe in zwei Gruppen und schauen uns die jeweilige Kaplan-Meier-Kurve an.
+In der Realität wirken aber meist mehrere Faktoren gleichzeitig, und sie sind oft nicht unabhängig voneinander: 
+Wer viel reist, verdient tendenziell auch mehr; wer unzufrieden ist, hat vielleicht schon öfter den Arbeitgeber gewechselt.
+Wenn wir immer nur einen einzigen Schnitt durch die Gesamtmenge machen können, können wir solche Effekte nicht auseinanderhalten.
+
+Das Cox Proportional-Hazards-Modell schätzt dagegen den Effekt mehrerer Einflussfaktoren gleichzeitig.
+Dafür formuliert es die
+
+> *Verbleibenswahrscheinlichkeit `x` Jahre nach Beginn*
+
+um in das
+
+> *momentane Kündigungsrisiko zur Zeit `t`, nachdem jemand bis `t` geblieben ist*.
+
+Außerdem teilt es das Risiko auf in den Baseline-Hazard über die ganze Gruppe hinweg und jede multiplikative Verschiebung davon durch die Kovariaten (Überstunden, ...).
+Wie groß die positive oder negative Verschiebung für eine bestimmte Kovariate ist, ermitteln wir durch das *model fitting*.
+Dabei wird das Verhältnis der Hazard-Raten zweier Individuen als über die Zeit konstant angenommen, daher der Name „proportional hazards“.
+
+### Auswahl und Aufbereitung der Kovariaten
+
+Wir wählen eine Teilmenge an Merkmalen, die inhaltlich plausible Treiber von Fluktuation sind, und bereiten sie für das Modell auf:
+
+- `MonthlyIncome` ist stark rechtsschief verteilt, daher loggen wir es (`logMonthlyIncome`). So entspricht der geschätzte Koeffizient einer *relativen* statt einer absoluten Gehaltsänderung.
+- `OverTime` codieren wir als 0/1.
+- `MaritalStatus` und `BusinessTravel` sind kategorial ohne natürliche Ordnung und werden per One-Hot-Encoding in Dummy-Variablen überführt (jeweils eine Referenzkategorie wird weggelassen: `Divorced` bzw. `Non-Travel`).
+- Ordinalskalierte Zufriedenheits- und Balance-Werte (`JobSatisfaction`, `EnvironmentSatisfaction`, `WorkLifeBalance`, `StockOptionLevel`) gehen als numerische Stufen ein.
 
 ```{python}
-#| column: page
+#| column: screen-inset
 
-# Stratifiziert nach JobSatisfaction
-colors = {
-    1: "#d7191c",
-    2: "#fdae61",
-    3: "#6fa333",
-    4: "#1a9641",
-}
+covariates = [
+    "Age", "MonthlyIncome", "DistanceFromHome", "NumCompaniesWorked",
+    "OverTime", "JobSatisfaction", "EnvironmentSatisfaction", "WorkLifeBalance",
+    "StockOptionLevel", "MaritalStatus", "BusinessTravel",
+]
+df_cox = df[covariates + ["duration", "event_observed"]].copy()
+df_cox["OverTime"] = (df_cox["OverTime"] == "Yes").astype(int)
+df_cox["MonthlyIncome"] = np.log(df_cox["MonthlyIncome"])
+df_cox = df_cox.rename(columns={"MonthlyIncome": "logMonthlyIncome"})
+df_cox = pd.get_dummies(df_cox, columns=["MaritalStatus", "BusinessTravel"], drop_first=True)
+bool_cols = df_cox.select_dtypes(bool).columns
+df_cox[bool_cols] = df_cox[bool_cols].astype(int)
+
+df_cox.head()
+```
+
+### Modellfit
+
+Zunächst einige Informationen aus dem model-fitting-Prozess:
+
+```{python}
+cph = CoxPHFitter()
+cph.fit(df_cox, duration_col="duration", event_col="event_observed")
+cph.print_summary()
+```
+
+Wenn wir zwei zufällige Mitarbeitende auswählen und vorhersagen würden, wer zuerst geht, wäre dies ohne weite Daten ein Münzwurf mit 50 % Wahrscheinlichkeit.
+Der **Concordance-Index** von rund 0,86 sagt nun aus: Wenn wir das Modell dafür benutzen würden, anhand der Prädiktoren der beiden Individuen zu schätzen, dann lägen wir in 86 % der Fälle richtig.
+Das ist eine deutliche Verbesserung.
+Der Log-Likelihood-Ratio-Test gegen ein Nullmodell ohne Kovariaten ist mit p ≈ 2,5·10⁻⁸³ hochsignifikant: Die gewählten Merkmale erklären gemeinsam substanziell mehr als der Zufall.
+
+### Hazard Ratios im Überblick
+
+Nun zu der großen Tabelle mit Informationen über jede einzelne Kovariate:
+Das sind eine Menge Zahlen, die sich besser visuell verstehen lassen und sich daher im Plot unten wiederfinden.
+Die Hazard Ratio auf der x-Achse lässt sich direkt interpretieren: Werte über 1 bedeuten ein erhöhtes, Werte unter 1 ein reduziertes Kündigungsrisiko pro Einheit der Kovariate, verglichen mit der Referenz.
+Der Forest Plot macht Effektstärke, Unsicherheit und Signifikanz auf einen Blick vergleichbar:
+
+```{python}
+#| fig-cap: "Die Hazard-Ratios der verschiedenen Kovariaten mit Effektstärke, Unsicherheit und farblich markierter Signifikanz, sortiert von stark positivem zu stark negativem Effekt auf den Hazard."
+#| label: fig-hazard
+
+summary = cph.summary.sort_values("exp(coef)")
+
+sig = summary["p"] < 0.05
+colors = np.where(~sig, "#999999", np.where(summary["exp(coef)"] > 1, "#d7191c", "#1a9641"))
 
 fig = go.Figure()
 
-for jsf, grp in df.groupby("JobSatisfaction"):
-    km_group = KaplanMeierFitter()
-    km_group.fit(
-        grp["duration"],
-        grp["event_observed"],
-        label=f"JobSat = {jsf}"
-    )
-    add_km_ci(fig, km_group, colors[jsf], label=f"JobSat = {jsf}")
-    if jsf in (2, 3):
-        for trace in fig.data[-3:]:
-            trace.visible = "legendonly"
+fig.add_vline(x=1, line_dash="dot", line_color="#666666")
+
+fig.add_trace(go.Scatter(
+    x=summary["exp(coef)"],
+    y=summary.index,
+    mode="markers",
+    marker=dict(color=colors, size=10),
+    error_x=dict(
+        type="data",
+        symmetric=False,
+        array=summary["exp(coef) upper 95%"] - summary["exp(coef)"],
+        arrayminus=summary["exp(coef)"] - summary["exp(coef) lower 95%"],
+        color="#888888",
+    ),
+    hovertemplate="<b>%{y}</b><br>Hazard Ratio: %{x:.2f}<extra></extra>",
+))
 
 fig.update_layout(
-    title="<b>Kaplan-Meier-Kurve</b><br> abhängig von der Variable JobSatisfaction",
-    yaxis_title="Verbleibenswahrscheinlichkeit",
-    xaxis_title="Jahre im Unternehmen",
-    hovermode="x unified",
-    margin_t=80,
-    legend=dict(
-        x=.02, y=.1,
-        yanchor="bottom",
-        xanchor="left",
-        bgcolor="rgba(255,255,255,.5)"
-    )
-)
-
-fig.for_each_trace(
-    lambda t: t.update(showlegend=True),
-    selector=lambda t: t.name not in ("Lower", "Upper"),
+    title="<b>Cox-Modell: Hazard Ratios</b><br>rot = erhöhtes, grün = reduziertes Kündigungsrisiko (grau = nicht signifikant, p ≥ 0.05)",
+    xaxis_title="Hazard Ratio (log-skaliert)",
+    xaxis_type="log",
+    margin=dict(t=80, l=190, r=0),
 )
 
 fig.show()
 ```
 
+Die Ergebnisse decken sich mit der univariaten Analyse oben, quantifizieren sie aber und kontrollieren gleichzeitig für die jeweils anderen Merkmale:
+
+- **Überstunden** (`OverTime`): Hazard Ratio ≈ 3,22. Überstunden sind mit einem gut verdreifachten Kündigungsrisiko verbunden, der stärkste Einzeleffekt im Modell.
+
+- **Einkommen** (`logMonthlyIncome`): Eine Verdopplung des Monatsgehalts ist mit einem um rund 61 % *reduzierten* Risiko verbunden. Gehalt ist ein starker protektiver Faktor.
+
+- **Reisetätigkeit**: Gegenüber `Non-Travel` haben Vielreisende (`Travel_Frequently`) ein knapp verdreifachtes (HR ≈ 2,90), Gelegenheitsreisende (`Travel_Rarely`) ein rund 83 % höheres Risiko (HR ≈ 1,83, an der Signifikanzgrenze).
+
+- **Familienstand**: Singles kündigen deutlich häufiger als Geschiedene (Referenzgruppe, HR ≈ 2,12); Verheiratete unterscheiden sich statistisch nicht von der Referenz.
+
+- **Zahl früherer Jobs** (`NumCompaniesWorked`): +21 % Risiko pro vorherigem Arbeitgeber. Eine Historie häufiger Wechsel setzt sich fort.
+
+- **Arbeitsweg** (`DistanceFromHome`): leichter, aber signifikanter Effekt (+3 % pro Kilometer Arbeitsweg).
+
+- **Alter** (`Age`): -6 % Risiko pro Lebensjahr, ältere Mitarbeitende bleiben tendenziell länger.
+
+- **Optionen der Firma** (`StockOptionLevel`): Effekt in die erwartete (protektive) Richtung, aber nicht signifikant (p ≈ 0,22).
+
+- **`JobSatisfaction`, `EnvironmentSatisfaction`, `WorkLifeBalance`**: jede Stufe auf der 1–4-Skala reduziert das Risiko um jeweils rund 19–20 %, auch nachdem für Gehalt, Reisetätigkeit & Co. kontrolliert wurde.
+
+
+### Prüfung der Proportional-Hazards-Annahme
+
+Das Modell setzt voraus, dass sich die Hazard-Raten zweier Ausprägungen einer Kovariate über die gesamte Zeitachse hinweg um einen konstanten Faktor unterscheiden.
+Ist das nicht der Fall, können Schätzungen verzerrt sein.
+`lifelines` bietet dafür einen statistischen Test (basierend auf skalierten Schoenfeld-Residuen):
+
+```{python}
+cph.check_assumptions(df_cox, p_value_threshold=0.05, show_plots=False);
+```
+
+Zwei Variablen (`logMonthlyIncome` und `MaritalStatus_Married`) fallen bei diesem Test knapp unter die 5-%-Schwelle, suggerieren also, dass ihr Einfluss auf die Verweildauer mit der Zeit linear variiert.
+Bei fast 1.500 Beobachtungen und einer zweistelligen Zahl an Kovariaten ist das nicht überraschend, schon aus reinem Zufall werden bei diesem Schwellenwert einzelne Merkmale auffällig, ohne dass die Modellschlüsse dadurch grundsätzlich infrage stehen.
+Für eine weiter gehende Produktivanalyse wäre der nächste Schritt, `logMonthlyIncome` zu binnen und darauf zu stratifizieren, oder einen Interaktionsterm mit der Zeit einzuführen.
+An dieser Stelle soll aber unsere Analyse enden.
+
 ## Fazit
 
-An den Kaplan-Meier-Kurven lässt sich ablesen, ob sich die Verbleibenswahrscheinlichkeit bestimmter Gruppen unterscheidet, etwa ob Überstunden einen Einfluss haben. Der Log-Rank-Test drückt als Zahl aus, was der Plot der beiden Gruppen schon suggeriert: Hier gibt es tatsächlich einen Unterschied.
+An den Kaplan-Meier-Kurven lässt sich ablesen, ob sich die Verbleibenswahrscheinlichkeit bestimmter Gruppen unterscheidet, etwa ob Überstunden einen Einfluss haben. Der Log-Rank-Test drückt zudem als Zahl aus, was der Plot der beiden Gruppen schon suggeriert: Hier gibt es tatsächlich einen Unterschied.
 
-Bei der Jobzufriedenheit ist das Bild nicht unähnlich, nur dass wir vier Abstufungen haben. Ein Klick auf die Legende im Plot zeigt die beiden mittleren Stufen und legt nahe: Wenn die Zufriedenheit von 4 auf 3 fällt, oder von 2 auf 1, werden erhebliche Unterschiede sichtbar.
+Das Cox-Modell bestätigt und schärft dieses Bild:
+Überstunden und geringe Zufriedenheit bleiben starke Treiber, auch wenn man gleichzeitig für Gehalt, Alter, Reisetätigkeit, Familienstand und Wechselhistorie kontrolliert.
+Gehalt erweist sich dabei als der stärkste *protektive* Hebel, dicht gefolgt von Zufriedenheits- und Work-Life-Balance-Werten, beides Stellschrauben, an denen ein Unternehmen aktiv drehen kann.
+Reisetätigkeit und ein langer Arbeitsweg sind eher strukturelle Risikofaktoren, die sich schwerer kurzfristig ändern lassen, aber bei der Gestaltung von Rollen und Standortentscheidungen mitgedacht werden sollten.
 
-Für eine reale People-Analytics-Fragestellung ließe sich daraus ableiten, welche Stellhebel (z. B. Reduktion von Überstunden) das größte Potenzial haben, Fluktuation zu senken und für welche Mitarbeitendengruppen präventive Maßnahmen (Retention-Gespräche, Entwicklungsangebote) am wirkungsvollsten wären.
+Aus dieser Analyse ließe sich ableiten, welche Stellhebel (z. B. Reduktion von Überstunden) das größte Potenzial haben, Fluktuation zu senken und für welche Mitarbeitendengruppen präventive Maßnahmen (Retention-Gespräche, Entwicklungsangebote) am wirkungsvollsten wären.
+
+Damit ergänzen sich die beiden Methoden: Kaplan-Meier liefert die intuitiv verständliche, gruppenweise Visualisierung; Cox Proportional-Hazards liefern die multivariate, wechselseitig kontrollierte Quantifizierung.
+Beides zusammen ist die Grundlage für datengetriebene Retention-Strategien.
 
 

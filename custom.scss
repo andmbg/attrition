@@ -20,3 +20,14 @@ pre.sourceCode, pre.sourceCode code {
     background-color: #2d2d2d !important;
     color: #ccc !important;
 }
+
+.cell-output-display table.dataframe {
+  width: auto;
+  table-layout: auto;
+}
+
+.cell-output-display table.dataframe th,
+.cell-output-display table.dataframe td {
+  white-space: nowrap;
+  padding: 0.4em 0.8em;
+}
